@@ -37,6 +37,12 @@ import (
 type SignOptions struct {
 	TSAClientTransport  http.RoundTripper
 	CertificateProvider sign.CertificateProvider
+
+	// FulcioClientTransport, if set, is used for requests to Fulcio for a
+	// signing certificate. It is not used when CertificateProvider is set.
+	FulcioClientTransport http.RoundTripper
+	// RekorClientTransport, if set, is used for requests to Rekor.
+	RekorClientTransport http.RoundTripper
 }
 
 func SignData(ctx context.Context, content sign.Content, keypair sign.Keypair, idToken string, cert []byte, certChain []byte, signingConfig *root.SigningConfig, trustedMaterial root.TrustedMaterial, opts SignOptions) ([]byte, error) {
@@ -55,7 +61,7 @@ func SignData(ctx context.Context, content sign.Content, keypair sign.Keypair, i
 			}
 		}
 	case idToken != "":
-		provider, err := newFulcioProvider(signingConfig)
+		provider, err := newFulcioProvider(signingConfig, opts.FulcioClientTransport)
 		if err != nil {
 			return nil, err
 		}
@@ -131,6 +137,7 @@ func SignData(ctx context.Context, content sign.Content, keypair sign.Keypair, i
 				Retries:   1,
 				Version:   rekorSvc.MajorAPIVersion,
 				UserAgent: useragent.Get(),
+				Transport: opts.RekorClientTransport,
 			}
 			bundleOpts.TransparencyLogs = append(bundleOpts.TransparencyLogs, sign.NewRekor(rekorOpts))
 		}
@@ -147,6 +154,7 @@ func SignData(ctx context.Context, content sign.Content, keypair sign.Keypair, i
 	spinner := ui.NewSpinner(ctx, "Signing artifact...")
 	defer spinner.Stop()
 
+	bundleOpts.Context = ctx
 	bundle, err := sign.Bundle(content, keypair, bundleOpts)
 	if err != nil {
 		return nil, fmt.Errorf("error signing bundle: %w", err)
@@ -226,7 +234,7 @@ func (c *cachingCertProvider) GetCertificate(ctx context.Context, keypair sign.K
 	return c.fetch()
 }
 
-func newFulcioProvider(signingConfig *root.SigningConfig) (sign.CertificateProvider, error) {
+func newFulcioProvider(signingConfig *root.SigningConfig, transport http.RoundTripper) (sign.CertificateProvider, error) {
 	if len(signingConfig.FulcioCertificateAuthorityURLs()) == 0 {
 		return nil, fmt.Errorf("no fulcio URLs provided in signing config")
 	}
@@ -239,6 +247,7 @@ func newFulcioProvider(signingConfig *root.SigningConfig) (sign.CertificateProvi
 		Timeout:   30 * time.Second,
 		Retries:   1,
 		UserAgent: useragent.Get(),
+		Transport: transport,
 	}
 	return sign.NewFulcio(fulcioOpts), nil
 }
@@ -247,7 +256,7 @@ func newFulcioProvider(signingConfig *root.SigningConfig) (sign.CertificateProvi
 // This function should not be used in long-running processes, as the certificate will
 // expire.
 func NewCachingFulcioProvider(signingConfig *root.SigningConfig) (sign.CertificateProvider, error) {
-	provider, err := newFulcioProvider(signingConfig)
+	provider, err := newFulcioProvider(signingConfig, nil)
 	if err != nil {
 		return nil, err
 	}
